@@ -1,0 +1,23 @@
+profiles:
+  default:
+    fqbn: 
+    platforms:
+      - platform: arduino:zephyr
+    libraries:
+      - dependency: ArduinoGraphics (1.1.5)
+      - dependency: Arduino_HS300x (1.0.1)
+      - dependency: Arduino_LPS22HB (1.0.3)
+      - dependency: Arduino_LSM6DSOX (1.1.2)
+      - dependency: Arduino_LTR381RGB (1.0.1)
+      - Arduino_Modulino (0.9.1)
+      - dependency: STM32duino VL53L4CD (1.0.5)
+      - dependency: STM32duino VL53L4ED (1.0.1)
+      - Servo (1.3.0)
+      - dependency: Adafruit BusIO (1.17.4)
+      - dependency: Adafruit GFX Library (1.12.6)
+      - Adafruit INA219 (1.2.3)
+      - dependency: Adafruit NeoPixel (1.15.5)
+      - dependency: Adafruit SSD1306 (2.5.17)
+      - Grove - LCD RGB Backlight (1.0.2)
+
+default_profile: default

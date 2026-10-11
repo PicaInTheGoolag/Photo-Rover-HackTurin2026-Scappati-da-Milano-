@@ -1,0 +1,9 @@
+# ignore app cache folder
+.cache/
+assets/maps-config.js
+data/
+__pycache__/
+*.pyc
+.venv/
+.env
+.cache/

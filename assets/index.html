@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SolarScout | HACKTURIN</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #0f172a;
+      color: #f8fafc;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    h1 { margin: 0; color: #facc15; font-size: 32px; }
+    h2 { margin: 0 0 12px; font-size: 21px; }
+    h3 { margin: 20px 0 10px; font-size: 15px; }
+    .subtitle { color: #94a3b8; margin: 8px 0 20px; }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .status {
+      background: #334155;
+      border: 1px solid #475569;
+      border-radius: 22px;
+      padding: 11px 16px;
+      font-size: 14px;
+    }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 16px; margin-bottom: 24px; }
+    .card { min-width: 0; padding: 20px; background: #1e293b; border: 1px solid #334155; border-radius: 14px; }
+    .label { color: #94a3b8; font-size: 14px; }
+    .value { margin-top: 12px; font-size: 25px; font-weight: bold; overflow-wrap: anywhere; }
+    .maps { display: grid; grid-template-columns: minmax(0,3fr) minmax(0,2fr); gap: 20px; align-items: start; }
+
+    /* Both the Google image and drawing canvas have a 3:2 aspect ratio. */
+    .map-stage {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 3 / 2;
+      overflow: hidden;
+      border-radius: 12px;
+      background-color: #243345;
+      background-image:
+        linear-gradient(#ffffff0b 1px, transparent 1px),
+        linear-gradient(90deg, #ffffff0b 1px, transparent 1px);
+      background-size: 44px 44px;
+      isolation: isolate;
+    }
+    #google-background, #trajectory {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    #google-background {
+      z-index: 0;
+      object-fit: fill;
+      opacity: 0;
+      transition: opacity .2s ease;
+    }
+    #google-background.is-loaded { opacity: 1; }
+    #trajectory { z-index: 1; background: transparent; pointer-events: none; }
+    .map-message {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      z-index: 2;
+      width: fit-content;
+      max-width: calc(100% - 24px);
+      padding: 9px 12px;
+      color: #fff;
+      font-size: 13px;
+      line-height: 1.4;
+      background: #0f172adc;
+      border: 1px solid #ffffff44;
+      border-radius: 9px;
+      pointer-events: none;
+    }
+    .map-message[hidden] { display: none; }
+    #location-info { color: #94a3b8; font-size: 13px; margin: 12px 0 0; overflow-wrap: anywhere; }
+    .map-note { color: #94a3b8; font-size: 12px; margin: 9px 0 0; }
+
+    .heatmap-container { width: 100%; max-width: 500px; margin: 0 auto; }
+    #heatmap { display: block; width: 100%; height: auto; aspect-ratio: 5 / 7; background: #f8fafc; border-radius: 8px; }
+    .legend { margin-top: 20px; }
+    .gradient {
+      width: 100%; height: 16px; border-radius: 8px;
+      background: linear-gradient(to right, #dc2626, #f97316 25%, #eab308 50%, #84cc16 75%, #16a34a);
+    }
+    .legend-labels { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; color: #94a3b8; font-size: 12px; }
+    .footer { margin-top: 30px; padding-top: 15px; border-top: 1px solid #334155; color: #94a3b8; text-align: center; font-size: 12px; }
+    @media (max-width: 1000px) { .maps { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+    @media (max-width: 550px) { body { padding: 12px; } h1 { font-size: 26px; } .stats { gap: 10px; } .card { padding: 14px; } .value { font-size: 20px; } }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div>
+      <h1>SolarScout</h1>
+      <p class="subtitle">Real-Time Solar Energy Mapping</p>
+    </div>
+    <div class="status" id="status" role="status" aria-live="polite">Connecting...</div>
+  </header>
+
+  <section class="stats" aria-label="Live solar statistics">
+    <div class="card"><div class="label">Current Power</div><div class="value" id="power">-- mW</div></div>
+    <div class="card"><div class="label">Maximum Power</div><div class="value" id="maxPower">-- mW</div></div>
+    <div class="card"><div class="label">Current Position</div><div class="value" id="position">--</div></div>
+    <div class="card"><div class="label">Measurements</div><div class="value" id="samples">0</div></div>
+  </section>
+
+  <main class="maps">
+    <section class="card">
+      <h2>Solar Trajectory</h2>
+      <p class="subtitle">Solar power measured along the route</p>
+      <div class="map-stage">
+        <img id="google-background" alt="" decoding="async">
+        <canvas id="trajectory" width="900" height="600" role="img" aria-label="Solar power trajectory">
+          Solar trajectory visualization
+        </canvas>
+        <div class="map-message" id="map-message" role="status">Preparing satellite map...</div>
+      </div>
+      <p id="location-info" aria-live="polite">Locating map...</p>
+      <p class="map-note" id="map-note">The trajectory uses relative Arduino X/Y coordinates. Accurate geographic alignment requires a known starting location and heading.</p>
+      <div class="legend">
+        <h3>Solar Power Intensity</h3>
+        <div class="gradient"></div>
+        <div class="legend-labels"><span>Low power</span><span>Medium power</span><span>High power</span></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Power Matrix 7×5</h2>
+      <p class="subtitle">Latest 35 power measurements</p>
+      <div class="heatmap-container">
+        <canvas id="heatmap" width="500" height="700" role="img" aria-label="Seven rows by five columns of power measurements">
+          Power matrix visualization
+        </canvas>
+      </div>
+      <div class="legend">
+        <h3>Power Distribution</h3>
+        <div class="gradient"></div>
+        <div class="legend-labels">
+    <span>0 mW</span>
+    <span>10 mW</span>
+    <span>20 mW</span>
+</div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    SolarScout | HACKTURIN
+    <p>Arduino UNO Q - Solar Energy Monitoring System</p>
+  </footer>
+
+  
+  <script src="maps-config.js"></script>
+  <script src="map.js"></script>
+  
+</body>
+</html>
