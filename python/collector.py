@@ -1,127 +1,70 @@
-import csv
+"""Bridge receiver: validate each complete 7x5 scan and persist it to SQLite."""
+
 import json
 import math
-
-from collections import deque
+import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 from threading import Lock
 
 from processing import process_power_matrix
 
 
 class SolarCollector:
-
-    def __init__(self):
-        self.points = deque(maxlen=1500)
-        self.power_matrix = []
+    def __init__(self, database):
+        self.db = database
         self.lock = Lock()
-
-        self.csv_file = Path("/tmp/solar_data.csv")
+        # Each application startup creates its own run, even after a restart.
+        self.active_run_id = self.db.create_run()["id"]
+        print(f"photoRover active run: {self.active_run_id}", flush=True)
 
     def receive(self, message):
-        """
-        Called by sketch.ino through Bridge.
-
-        Expected JSON:
-        {
-            "x": 1.5,
-            "y": 2.0,
-            "voltage": [[...10x10...]],
-            "current": [[...10x10...]]
-        }
-        """
-
+        """Called by Bridge.notify('solar_data', JSON), once per 35-reading scan."""
         try:
-            if isinstance(message, (str, bytes)):
-                data = json.loads(message)
-            else:
-                data = message
-
+            data = json.loads(message) if isinstance(message, (str, bytes)) else message
             x = float(data["x"])
             y = float(data["y"])
-
             if not math.isfinite(x) or not math.isfinite(y):
-                raise ValueError("Invalid coordinates")
-
-            power_matrix, average_power = process_power_matrix(
-            data["power"]
-            )
-
+                raise ValueError("Invalid x or y")
+            matrix, average_power = process_power_matrix(data["power"])
             point = {
-                "timestamp": datetime.now(
-                    timezone.utc
-                ).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "x": x,
                 "y": y,
                 "power_mw": round(average_power, 3)
             }
-
             with self.lock:
-                self.points.append(point)
-                self.power_matrix = power_matrix
-
-            self.save_csv(point, power_matrix)
-
+                run_id = self.active_run_id
+                scan_id = self.db.add_scan(run_id, point, matrix)
             print(
-                f"X={x:.2f}, Y={y:.2f}, "
-                f"P={average_power:.2f} mW",
-                flush=True
+                f"Run={run_id} Scan={scan_id} X={x:.2f} Y={y:.2f} "
+                f"Average={average_power:.2f} mW", flush=True
             )
-
-        except (
-            ValueError,
-            TypeError,
-            KeyError,
-            json.JSONDecodeError
-        ) as error:
-            print("Invalid sensor data:", error, flush=True)
-
-    def save_csv(self, point, power_matrix):
-        """Save measurements for later analysis."""
-
-        try:
-            new_file = (
-                not self.csv_file.exists()
-                or self.csv_file.stat().st_size == 0
-            )
-
-            with open(self.csv_file, "a", newline="") as f:
-                writer = csv.writer(f)
-
-                if new_file:
-                    writer.writerow([
-                        "timestamp",
-                        "x",
-                        "y",
-                        "average_power_mw",
-                        "power"
-                    ])
-
-                writer.writerow([
-                    point["timestamp"],
-                    point["x"],
-                    point["y"],
-                    point["power_mw"],
-                    json.dumps(power_matrix)
-                ])
-
-        except OSError as error:
-            print("CSV save failed:", error, flush=True)
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError, sqlite3.Error) as error:
+            print("Invalid sensor data or DB write failed:", error, flush=True)
 
     def get_data(self):
-        """Return data for the WebUI dashboard."""
-
         with self.lock:
-            points = list(self.points)
-            matrix = [
-                row.copy()
-                for row in self.power_matrix
-            ]
+            run_id = self.active_run_id
+        return self.db.run_data(run_id)
 
-        return {
-            "points": points,
-            "power_matrix": matrix,
-            "latest": points[-1] if points else None,
-            "count": len(points)
-        }
+    def get_active_id(self):
+        with self.lock:
+            return self.active_run_id
+
+    def start_new_run(self, name=None):
+        # Prevent an incoming Arduino scan being split between two runs.
+        with self.lock:
+            run = self.db.create_run(name)
+            self.active_run_id = run["id"]
+        return run
+
+    def remove_run(self, run_id):
+        with self.lock:
+            if not self.db.get_run(run_id):
+                return False, None
+            self.db.delete_run(run_id)
+            replacement = None
+            if self.active_run_id == run_id:
+                replacement = self.db.create_run()
+                self.active_run_id = replacement["id"]
+        return True, replacement
