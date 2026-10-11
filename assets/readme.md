@@ -1,161 +1,109 @@
-# photoRover · Web dashboard (`assets/`)
+# photoRover: web dashboard (`assets/`)
 
-This directory contains the browser interface for **photoRover**, a mobile photovoltaic survey prototype built for HACKTURIN 2026 on Arduino UNO Q. The interface is titled **SolarScout** in the current source code. It displays measurements sent by the Arduino sketch and processed by the Python backend, including a colored rover trajectory, a 7 × 5 power heatmap, and an optional satellite background.
+The photoRover dashboard is a **plain HTML/CSS/JavaScript** interface served by Arduino App Lab's WebUI. The visible page title is still **SolarScout**. It shows live or saved solar surveys, colored rover trajectories, per-scan 7×5 power maps and controls for managing SQLite-backed survey runs.
 
-The frontend uses **plain HTML, CSS, and JavaScript**. It does not require React, Node.js, or a frontend build step.
+There is no React/Vite/Node frontend build step in this folder. The page uses `fetch()` against the Python backend's **same-origin** API endpoints.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `index.html` | Dashboard markup and inline CSS; responsive layout, statistics, map/image and canvas layers, status messages, legends, and heatmap canvas. |
-| `map.js` | Polls the Python API, draws the trajectory and heatmap, updates statistics, resolves a map origin, and requests auto-framed satellite images. |
-| `maps-config.js` | **Local configuration file referenced by `index.html`, but not included in the ZIP.** Supplies a Google Maps Static API key to `map.js`; ignored by the repository's `.gitignore`. |
+| `index.html` | Entire dashboard markup/styles: survey selector, create/rename/delete buttons, origin controls, statistics, trajectory canvas, heatmap and legends. |
+| `map.js` | REST polling, survey/scan switching, drawing canvases, Google Static Maps overlay and GPS/map-origin handling. |
+| `maps-config.js` | **Optional local file; ignored by git and not bundled.** Sets `window.SOLARSCOUT_GOOGLE_MAPS_KEY`. |
 
-The repository's `app.yaml` enables the Arduino App Lab `arduino:web_ui` brick. `python/app.py` registers the data endpoint consumed by this dashboard.
+The page loads `maps-config.js` **before** `map.js`. A missing optional configuration file may cause a browser 404 in the Network panel, but `map.js` can still show a non-satellite trajectory and measurements.
 
-## Dashboard overview
+## Dashboard tour
 
-The interface provides:
+### Survey Runs
 
-- **Current Power:** `latest.power_mw`, the **mean of 35 measured powers** for the most recently received scan.
-- **Maximum Power:** the largest **per-position mean** among retained route points. This is *not* the Arduino firmware's single-angle peak reading.
-- **Current Position:** the latest relative `x, y` coordinates received from the rover.
-- **Measurements:** count of accepted scan positions retained by the Python collector.
-- **Solar Trajectory:** a colored line joining successive positions, with numbered markers (numbers displayed when there are at most 50 points). The first marker is blue; the newest is dark.
-- **Power Matrix 7×5:** the latest scan's 35 power measurements shown as colored cells. Rows represent pan positions; columns represent tilt positions.
-- **Satellite image:** an optional Google Maps Static API image under the transparent trajectory canvas, automatically reframed as the route grows.
+- **Current or saved run:** choose the live run or any historical run in SQLite. The live run is marked `● LIVE`; each entry shows a name and number of steps.
+- **Run name:** type a name, then click **Rename** to update the selected run. Names must be nonempty and 100 characters or fewer.
+- **New run:** creates a new *active* run. Subsequent Arduino Bridge scans are recorded under this run. Older runs are retained.
+- **Delete:** prompts for confirmation, then **permanently deletes** the selected run and all its scans. Deleting the active run automatically creates a new active run.
+- **Starting GPS latitude/longitude:** enter the rover's starting coordinates and click **Save GPS**. You can also click **Use browser GPS**, but *verify the coordinates correspond to the rover*, then click **Save GPS**. Browser GPS may identify a laptop or phone far away from the MCU.
+- The selected run shows its creation timestamp, number of steps and starting-GPS metadata. The browser formats stored UTC timestamps in the viewer's local timezone.
 
-The 7 × 5 heatmap has **seven pan-angle rows** (0°, 30°, 60°, 90°, 120°, 150°, 180°) and **five tilt-angle columns** (30°, 60°, 90°, 120°, 150°), matching the current firmware. The canvas itself does **not** label the angles or print numerical power values inside each cell.
+### Statistics and trajectory
 
-## How data reaches the browser
+Four cards show **Current Power**, **Maximum Power**, **Current Position**, and **Measurements** for the selected survey:
 
-```mermaid
-sequenceDiagram
-    participant MCU as Arduino sketch
-    participant Bridge as RouterBridge
-    participant PY as Python collector
-    participant API as WebUI API
-    participant UI as assets/map.js
-    MCU->>Bridge: notify("solar_data", JSON)
-    Bridge->>PY: receive(message)
-    PY->>PY: validate 7x5 and average the powers
-    UI->>API: GET /api/solar (every 1 second)
-    API->>PY: get_data()
-    PY-->>UI: points, power_matrix, latest, count
-    UI->>UI: redraw trajectory, heatmap, statistics
-    UI->>UI: reframe satellite when route changes
-```
+- **Current Power:** mean power of all 35 angular readings from the selected scan (or latest when `Latest step` is chosen).
+- **Maximum Power:** largest *per-step mean power* across the entire selected run, not the maximum cell in one scan.
+- **Current Position:** X/Y for the selected scan, as supplied by the MCU's relative dead reckoning.
+- **Measurements:** number of stored completed scans in the selected run.
 
-`map.js` uses `fetch("/api/solar", { cache: "no-store" })`. The Python backend exposes that **same-origin** endpoint via `WebUI.expose_api("GET", "/api/solar", collector.get_data)`.
+The **Solar Trajectory** canvas plots all the run's points, using the measured **mean** power to color route segments. Its first point is blue; its most recent point is dark. Markers are numbered when there are at most 50 visible points. Without satellite imagery, the canvas draws a relative-position route on the background grid.
 
-A simplified response looks like:
+### Power Matrix 7×5
 
-```json
-{
-  "points": [
-    { "timestamp": "2026-10-11T08:00:00+00:00", "x": 0.0, "y": 0.0, "power_mw": 8.4 },
-    { "timestamp": "2026-10-11T08:01:00+00:00", "x": 1.2, "y": 0.5, "power_mw": 14.2 }
-  ],
-  "power_matrix": [
-    [4, 6, 8, 10, 12],
-    [5, 7, 9, 11, 13],
-    [6, 8, 10, 12, 14],
-    [7, 9, 11, 13, 15],
-    [8, 10, 12, 14, 16],
-    [9, 11, 13, 15, 17],
-    [10, 12, 14, 16, 18]
-  ],
-  "latest": { "timestamp": "2026-10-11T08:01:00+00:00", "x": 1.2, "y": 0.5, "power_mw": 14.2 },
-  "count": 2
-}
-```
+**Reading / step** lets you choose **Latest step** or any saved step by number, timestamp and X/Y. Switching to an older scan shows that step's complete power matrix, while the trajectory still represents the **whole run**.
 
-The numbers above illustrate the response **shape**, not an actual recorded scan. The real `power_matrix` holds the most recent complete scan; the `points` array retains previous positions and their average powers. The Python collector retains up to **1,500** points in memory per app process.
+The heatmap presents:
 
-> **Update frequency:** The browser checks for data every **1,000 ms** (`REFRESH_INTERVAL_MS`). This is not the Arduino's sampling rate: the firmware sends a new message only **after a complete 35-orientation scan**.
+| Axis | Displayed values | Physical servo values in `sketch.ino` |
+| --- | --- | --- |
+| **PAN**: 7 **columns** | `−90, −60, −30, 0, 30, 60, 90°` | `0, 30, 60, 90, 120, 150, 180°` |
+| **TILT**: 5 **rows** | `−60, −30, 0, 30, 60°` | `30, 60, 90, 120, 150°` |
 
-## Power colors
+Each displayed angle is the **physical servo command minus 90°**. This shift is a display convention and does not change the stored matrix or physical servo commands. Stored values are indexed `matrix[pan][tilt]`; `drawHeatmap()` transposes **only their visual arrangement**.
 
-Both the trajectory and heatmap call `powerColor()` in `map.js`. The committed settings are:
+- The heatmap uses the same **red → orange → yellow → green** interpolation as the route: **0 mW = red**; **20 mW and higher = green**. The configured endpoints are `RED_POWER_MW = 0` and `GREEN_POWER_MW = 20` in `map.js`.
+- Its highest-power **single cell** is outlined in thick dark/white strokes and marked `MAX`; its **original fill color is preserved**.
+- Before the first scan, cells have neutral placeholder backgrounds.
+- The 840×600 canvas reserves margins inside its drawing area for readable dark PAN/TILT headers, avoiding clipped/white-on-white labels.
 
-```javascript
-const RED_POWER_MW = 0;
-const GREEN_POWER_MW = 20;
-```
+## Fetching data
 
-| Measured power | Display color |
+The dashboard polls roughly every **1,000 ms** (`REFRESH_INTERVAL_MS` in `map.js`). Scans appear as soon as Python has saved them, which happens only after a *full* Arduino sweep. For the active run, it calls `/api/solar`; for an older selected run, it calls `/api/runs/{run_id}`. Run summaries are refreshed periodically (about every eight polls). An explicitly selected historical scan fetches its full matrix from `/api/runs/{run_id}/scans/{scan_id}` and caches it in the current browser tab.
+
+| Endpoint | Dashboard use |
 | --- | --- |
-| 0 mW or below | Red |
-| ~5 mW | Orange |
-| ~10 mW | Yellow |
-| ~15 mW | Yellow-green |
-| 20 mW or above | Green |
+| `GET /api/solar` | Live run data, all trajectory points and latest matrix. |
+| `GET /api/runs` | Survey selector and active run identity. |
+| `POST /api/runs` | New live survey. |
+| `GET /api/runs/{id}` | Saved run and its route. |
+| `PATCH /api/runs/{id}` | Rename selected run. |
+| `PATCH /api/runs/{id}/origin` | Save selected run's starting GPS. |
+| `DELETE /api/runs/{id}` | Delete selected run and all steps. |
+| `GET /api/runs/{id}/scans/{scan_id}` | Retrieve the chosen scan's full 7×5 matrix. |
 
-Values are clamped at the endpoints. To recalibrate the display for another panel, change these constants in `map.js` and update the labels in `index.html` accordingly. They affect visualization only, not the electrical measurement or Python calculations.
+Names and API feedback are displayed with `textContent` rather than inserted as HTML. Browser controls are *not authentication*: the server routes can currently be called by other clients on the same accessible network.
 
-## Run with Arduino App Lab
+## Optional Google Maps satellite layer
 
-1. Open the photoRover project in **Arduino App Lab** on the UNO Q.
-2. Start its Python application (`python/main.py` calls `start_app()`); the WebUI server is initialized by `python/app.py`.
-3. Open the **WebUI URL shown in the App Lab logs** in a browser. The backend commonly uses port `7000`, but use the URL printed by your running instance or the App Lab-provided forwarding URL.
-4. Let the rover finish a scan; the statistics and 7×5 heatmap should update. Move the cart and perform further scans to grow the route.
-5. For direct API debugging, open **`/api/solar` on the same WebUI origin** and check `count`, `points`, and `power_matrix`.
+### Enable it
 
-Do not open `index.html` as a local `file://` page for live operation. Its relative API path must resolve against the running Arduino WebUI backend.
-
-### Enable the satellite background
-
-`map.js` reads its API key from:
+Create `assets/maps-config.js` with your own restricted key:
 
 ```javascript
-const GOOGLE_MAPS_KEY = window.SOLARSCOUT_GOOGLE_MAPS_KEY || "";
+window.SOLARSCOUT_GOOGLE_MAPS_KEY = "YOUR_RESTRICTED_GOOGLE_MAPS_STATIC_API_KEY";
 ```
 
-The checked-in `index.html` loads `maps-config.js` **before** `map.js`, but the ZIP **does not contain** `maps-config.js` because it is gitignored. Create `assets/maps-config.js` locally:
+The code uses **Google Maps Static API** via an `<img>` element (`size=600x400`, `scale=2`, `maptype=satellite`). Google Cloud billing, the API itself and suitable key restrictions must be enabled. API keys embedded in browser code are visible to browser users: never use an unrestricted production key. `maps-config.js` is excluded by `.gitignore`.
 
-```javascript
-window.SOLARSCOUT_GOOGLE_MAPS_KEY = "YOUR_RESTRICTED_MAPS_STATIC_API_KEY";
-```
+### Location and alignment
 
-In Google Cloud, enable **Maps Static API**, set up billing, and configure application/API restrictions appropriate for the exact URL/origin through which you access App Lab. Google Maps browser-side keys remain visible to clients; excluding this file from Git is not a substitute for key restrictions. Do not commit an unrestricted key.
+For a survey with saved starting coordinates, `applyRunOrigin()` uses **that survey's latitude/longitude** to place the route. If a saved origin is missing, the script attempts to use a temporary display origin: browser geolocation in a secure context, then approximate `ipapi.co` location, then a demonstration fallback (`45.4782, 9.2273`). **These unsaved fallback coordinates are not genuine rover GPS and are never automatically persisted.**
 
-### Location and automatic zoom
+The code assumes local **X = east** and **Y = north**, with X/Y expressed in meters, then projects them to Web Mercator. It automatically estimates a map center and zoom from the route extent, fetching a new satellite image when the frame changes. Because `sketch.ino` does not send compass heading, actual geographical alignment may be rotated and drifted. Browser GPS additionally may describe the computer rather than the rover. Treat the backdrop as illustrative unless the origin, heading and relative positions have been calibrated.
 
-In the archived `map.js`, `MANUAL_LOCATION = null`. The code then tries:
+When a satellite request fails, the existing map/relative route remain visible, and a message describes possible API-key problems. Satellite imagery is **not required** for database management or heatmap rendering.
 
-1. Browser geolocation, **only when the browser reports a secure context** and the user grants permission.
-2. Approximate IP geolocation via `https://ipapi.co/json/`.
-3. A fallback location, **but the current source comments out `FALLBACK_LOCATION`**, so the fallback can fail (see *Known issues*).
+## Running and troubleshooting
 
-Browser/IP location is the **viewer's location estimate**, not an onboard rover GPS position. For a fixed demo origin, configure `MANUAL_LOCATION` with a `lat`, `lon`, and `source` string. The map conversion treats Arduino `x` and `y` as meters in a local coordinate system with **X east and Y north**. The firmware does not reliably guarantee that orientation or GPS-grade position accuracy.
+1. Open photoRover in **Arduino App Lab** on the UNO Q and start the sketch and Python application.
+2. Open the **WebUI URL shown by App Lab**, using the same host as the Python backend. A local `file://` copy of `index.html` will not reach relative `/api/...` endpoints.
+3. Wait for a complete Arduino scan to appear in SQLite. Use **Survey Runs** and **Reading / step** to inspect older measurements.
+4. After editing `map.js` or `index.html`, restart/reload the WebUI and hard-refresh (`Ctrl + Shift + R`) if the browser displays stale code.
 
-When the set of route points changes, `makeMapFrame()` projects their estimated positions into Web Mercator, calculates a center, and selects a Google Static Maps integer zoom from **0 to 21** to keep the points within approximately **74%** of the image dimensions. A new satellite image is preloaded before its drawing frame is applied. The background uses a **600 × 400 logical-pixel image (`scale=2`)**, overlaid by a **900 × 600 canvas** with the same 3:2 aspect ratio. Google imagery resolution and available detail limit the maximum useful zoom.
+**If the page says “Backend disconnected”:** open `/api/solar` and `/api/runs` on the WebUI origin and confirm Python `start_app()` ran and `PhotoRoverDB()` could access the database path. Check the browser developer console for JavaScript errors and Network requests.
 
-The satellite image is **optional**: the line and markers can still be drawn against the dashboard's grid background when an image cannot load.
+**If the matrix is empty but the backend is connected:** scans are added only after **all 35 power samples** arrive in a valid 7×5 `power` array; check the Python/Arduino logs and the API's `count` / `power_matrix` fields. The included 10×10 `test_data.json` fixture is incompatible with the active collector.
 
-## Troubleshooting
+**If satellite imagery is missing:** check that `maps-config.js` loads before `map.js`; verify Google Cloud billing, Maps Static API, key restrictions and the `staticmap` Network request. No key is needed for offline/relative route drawing.
 
-| Symptom | What to check |
-| --- | --- |
-| **Connecting...** never changes | Confirm the browser loads `map.js`; open DevTools Console for syntax errors and Network for JS 404s. |
-| **Backend disconnected** | Open `/api/solar` on the *same origin*; verify App Lab Python/WebUI is running. |
-| **Waiting for samples / 0 measurements** | Wait for a completed Arduino scan; inspect Python logs for `Invalid sensor data` and confirm the firmware sends `"power"` as a 7 × 5 array. |
-| **Heatmap blank** | The API must return `power_matrix` with **7 rows of 5 numbers**, not the firmware's `power` key or the legacy 10 × 10 format. |
-| **Previous point seems replaced** | Check API `count`, X/Y values, and whether multiple readings overlap spatially. The numbered markers are redrawn from all stored `points`. |
-| **No satellite image** | Confirm `maps-config.js` exists, loads before `map.js`, and sets `window.SOLARSCOUT_GOOGLE_MAPS_KEY`. Inspect DevTools **Network → staticmap** for HTTP 400/403 and its response. |
-| **Location unavailable** | Local HTTP may block precise browser geolocation; IP lookup can also fail. Supply an explicit map origin or handle the missing-location case. |
-| **Satellite route appears misplaced** | Relative IMU X/Y is not GPS, and the code assumes an east/north alignment that is not established by the firmware. |
+**If map points do not match GPS:** remember the Arduino transmits estimated X/Y without GPS or heading. Creating a new dashboard run does **not** zero the MCU's X/Y counters, and saving an origin does not translate earlier X/Y samples.
 
-## Known issues in the supplied ZIP
-
-- **Missing fallback declaration:** `map.js` ends `getMapLocation()` with `return FALLBACK_LOCATION;`, but the `FALLBACK_LOCATION` declaration is commented out. If browser and IP geolocation fail, this produces a `ReferenceError`; location initialization can stop. Fix by defining a fallback explicitly, or returning `null` and handling that case before accessing `mapOrigin.lat`.
-- **Missing local config file:** `index.html` references `maps-config.js`, but it is absent from the committed archive by design. Without creating the file locally, the satellite background will not have an API key.
-- **Approximate cart position:** The trajectory is an IMU-derived estimate, and placing it over a geographic satellite map should not be interpreted as accurate GPS mapping.
-- **No per-angle labels or per-cell numbers:** The 7 × 5 heatmap currently uses plain colored canvas cells, with no pan/tilt axis labels or peak-cell marker.
-
-## Related documentation
-
-- [photoRover project overview](../README.md)
-- [Python backend and data API](../python/README.md)
-- [Arduino firmware and scan geometry](../sketch/README.md)
+See [project overview](../README.md), [Python database/API](../python/readme.md), and [Arduino firmware](../sketch/readme.md).

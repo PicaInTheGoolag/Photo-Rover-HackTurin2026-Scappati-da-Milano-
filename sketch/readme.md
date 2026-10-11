@@ -1,23 +1,33 @@
-# photoRover · Arduino firmware
+# photoRover: Arduino UNO Q firmware (`sketch/`)
 
-`sketch.ino` is the microcontroller firmware for **photoRover**, a mobile, two-axis photovoltaic scanning prototype built for HACKTURIN 2026 on the **Arduino UNO Q**. It measures a photovoltaic panel at multiple orientations, estimates relative cart movement using a Modulino Movement IMU, shows the strongest scan result on a 16×2 LCD, and sends a **7×5 power matrix** to the Python backend through RouterBridge.
+`sketch.ino` runs the hardware side of photoRover on the **Arduino UNO Q**. The sketch scans a photovoltaic panel with two servos, samples electrical power and analog light, watches an IMU to wait for stable stops, estimates relative cart position, and sends one **7×5 solar power matrix** to Python after each completed scan. It also moves the panel to the highest-power angle and reports results through the LCD and Serial Monitor.
 
-## Hardware interfaces in the code
+The Python/SQLite database lives on the Linux/App Lab side, **not** in this Arduino sketch.
 
-| Device | Interface / definition | Role |
-| --- | --- | --- |
-| Pan servo | `panServo.attach(9)` | Horizontal rotation, commanded between 0° and 180° |
-| Tilt servo | `tiltServo.attach(10)` | Panel inclination, commanded between 30° and 150° |
-| INA219 | I²C / `Adafruit_INA219 ina219(0x40)` | Bus voltage and current measurement |
-| Analog light sensor | `analogRead(A0)` | Supplemental light value at every scan orientation |
-| Modulino Movement | `Modulino.begin()`, `movement.begin()` | Acceleration, roll and pitch, stability sensing |
-| Grove RGB LCD | `rgb_lcd lcd; lcd.begin(16, 2)` | Shows last relative position and peak measured power |
-| Serial | `Serial.begin(9600)` | Scan details, differences, status, and CSV-formatted text |
-| Arduino RouterBridge | `Bridge.begin()`, `Bridge.notify()` | Transfers completed scans to Python App Lab |
+## Source and configuration
 
-**Wiring caveat:** These are **connections inferred from source code**, not a complete verified electrical schematic. The sketch does not specify supply voltages, a power-distribution circuit, or the detailed Modulino connector routing. Power the servos from an appropriately rated regulated supply and share ground with the controller as required by the hardware design.
+| File | Purpose |
+| --- | --- |
+| `sketch.ino` | All firmware logic: devices, scanning, IMU, dead reckoning, display and `Bridge.notify()`. |
+| `sketch.yaml` | Default Arduino App Lab sketch profile, Zephyr platform and pinned dependency versions. |
+| `readme.md` | This hardware and firmware reference. |
 
-### Libraries and platform
+## Hardware connections described by the code
+
+| Component | Firmware binding / role |
+| --- | --- |
+| **Arduino UNO Q** | Host MCU, Arduino RouterBridge connection to Python. |
+| **PV panel + INA219** | `Adafruit_INA219 ina219(0x40)` on I²C; reads bus voltage in V and current in mA. |
+| **Light sensor** | `analogRead(A0)`, averages five readings. |
+| **Modulino Movement** | `ModulinoMovement movement`; motion/stability and acceleration, roll and pitch. |
+| **Pan servo** | `panServo.attach(9)`, Arduino digital pin **9**. |
+| **Tilt servo** | `tiltServo.attach(10)`, Arduino digital pin **10**. |
+| **Grove RGB LCD 16×2** | `rgb_lcd lcd`, I²C; last X/Y estimate and maximum scan power. |
+| **Serial Monitor** | `Serial.begin(9600)`, verbose scan data, comparison maps and CSV-like route output. |
+
+The source does not include a full electrical wiring schematic. Check power, ground and physical I²C bus connections against your prototype. **Do not power both servos directly from GPIO signal pins**; use a suitable regulated power source and a common ground.
+
+### Arduino libraries
 
 The sketch includes:
 
@@ -30,11 +40,11 @@ The sketch includes:
 #include "rgb_lcd.h"
 ```
 
-`sketch.yaml` declares the `arduino:zephyr` platform and pins versions for **Arduino_Modulino**, **Servo**, **Adafruit INA219**, **Grove - LCD RGB Backlight**, and other dependencies. Its `fqbn` field is currently blank; select/build for the correct Arduino UNO Q target in your App Lab environment.
+`sketch.yaml` selects `arduino:zephyr` and lists **Arduino_Modulino 0.9.1**, **Servo 1.3.0**, **Adafruit INA219 1.2.3**, **Grove - LCD RGB Backlight 1.0.2**, plus other direct/transitive library dependencies. Build through the matching Arduino UNO Q / App Lab toolchain rather than assuming a generic Arduino UNO compilation target.
 
-## Scanning geometry
+## Scan geometry and matrix indexing
 
-The panel's pan and tilt motion is defined by:
+The code declares:
 
 ```cpp
 const int PAN_MIN  = 0;
@@ -44,146 +54,110 @@ const int TILT_MAX = 150;
 const int STEP     = 30;
 ```
 
-| Axis | Scan angles | Positions |
-| --- | --- | --- |
-| Pan | 0°, 30°, 60°, 90°, 120°, 150°, 180° | 7 |
-| Tilt | 30°, 60°, 90°, 120°, 150° | 5 |
-| Total | Pan × tilt | **35 measurements per stationary scan** |
+Therefore there are **7** physical pan commands (`0,30,60,90,120,150,180°`) and **5** tilt commands (`30,60,90,120,150°`), or **35** combinations.
 
-The arrays are declared with `[PAN_STEPS][TILT_STEPS]`, so `powerMap[panIndex][tiltIndex]` has **7 rows and 5 columns**.
-
-A complete scan runs pan as the outer loop and tilt as the inner loop. It also collects `lightMap`, `voltageMap`, and `currentMap` locally, but **only `powerMap`** is transmitted to Python.
-
-## Electrical measurements
-
-For each orientation, `readPanel()` performs five INA219 samples with a 10 ms delay between samples. It averages:
-
-- `ina219.getBusVoltage_V()` → voltage in volts.
-- `ina219.getCurrent_mA()` → current in milliamperes.
-
-Then computes:
+Arrays are declared with the first index for pan and the second for tilt:
 
 ```cpp
-power_mW = avgV * avgI;
+float voltageMap[PAN_STEPS][TILT_STEPS];
+float currentMap[PAN_STEPS][TILT_STEPS];
+float powerMap[PAN_STEPS][TILT_STEPS];
 ```
 
-This yields **milliwatts** because `V × mA = mW`. `readLight()` independently averages five ADC values on A0.
+The packet sent to Python is likewise `power[panIndex][tiltIndex]`, **seven arrays of five values**. The dashboard subsequently displays the 7 pan values as *columns* and the 5 tilt values as *rows*. It labels these angles **relative to 90°**, namely pan `−90…90°` and tilt `−60…60°`. **The firmware itself still sends the physical 0…180° / 30…150° commands**; the browser subtracts 90° only when labeling its axes.
 
-The maximum power in the sweep is found by:
+## Electrical and light measurements
+
+At each angle:
+
+1. The pan and/or tilt servo moves and waits for the default **350 ms** settle time.
+2. `readLight()` averages **5** `analogRead(A0)` samples, each with a 10 ms delay.
+3. `readPanel()` averages **5** INA219 bus-voltage and current readings, also with 10 ms delays.
+4. The firmware computes `power_mW = voltage_V * current_mA` (because V × mA = mW).
+5. Light, voltage, current and power are stored in their local 7×5 arrays. The sketch tracks the highest `power_mW` and its physical pan/tilt commands.
+
+Only the **power matrix** and **relative X/Y** are included in the Bridge message. Analog light, per-angle voltage and current, selected best pan/tilt, and measured roll/pitch are **not** persisted by the current Python database. They remain available in the firmware's Serial output and/or local arrays.
+
+## Stability, dead reckoning and main loop
+
+**Setup:**
+
+1. Starts Serial at 9600 baud and initializes the Arduino RouterBridge (`Bridge.begin()`).
+2. Starts I²C and LCD; initializes INA219 or stops if the INA219 is not detected.
+3. Starts Modulino and Movement, calibrates acceleration X/Y offsets by averaging **20** readings while the cart is stationary.
+4. Attaches servos at pins 9/10, points both to `90°`, and starts the dead-reckoning timer.
+
+**Loop:**
+
+1. Calls `updatePosition()`, which integrates offset-corrected acceleration into X/Y velocity/position with a noise threshold and damping factor.
+2. Checks `isStable()` using changes in acceleration over **5** samples, with an additional **1,000 ms** stability window in `waitForStability()`.
+3. Stops integrated velocity, preserves the previous maps, then scans all 35 servo combinations.
+4. Prints the scan's light and power maps and differences from the previous power map, then returns the panel to the best recorded physical orientation.
+5. Stores a route summary in the firmware buffer (up to **50** points), updates the LCD with X/Y and peak measured power, prints a CSV-like map summary, and calls `sendPositionAndPower()`.
+6. Waits until movement is detected again before scanning the next stop.
+
+> **Timing:** Each of the 35 orientations incurs servo settle and sampling delays, and there are additional stabilization checks. The Python/dashboard one-second polling rate does not imply that the MCU produces one scan per second.
+
+## Arduino → Python JSON packet
+
+The firmware assembles a JSON string and sends it via:
 
 ```cpp
-if (panel.power_mW > maxPower) {
-    maxPower = panel.power_mW;
-    bestPan = pan;
-    bestTilt = tilt;
-}
+Bridge.notify("solar_data", json);
 ```
 
-After scanning, the panel is returned to `bestPan` and `bestTilt`, and the LCD is updated with `Pmax` and the estimated rover X/Y position.
-
-> **Interpretation:** This is measured electrical output under the test circuit and load conditions, **not calibrated irradiance**. Changes to the load, battery/charger arrangement, panel temperature, and measurement wiring can change observed power.
-
-## Scan and movement state machine
-
-```mermaid
-flowchart TD
-    A[Boot + initialize Bridge, sensors, LCD, servos] --> B[Calibrate stationary IMU]
-    B --> C[Update relative position]
-    C --> D{Cart stable?}
-    D -- No --> C
-    D -- Yes --> E[Stability confirmation and safety delay]
-    E --> F[Scan all 35 pan/tilt combinations]
-    F --> G[Find best measured power and angles]
-    G --> H[Move to best angle; update LCD + serial report]
-    H --> I[Send x, y, power 7x5 via Bridge]
-    I --> J{Cart moves again?}
-    J -- No --> J
-    J -- Yes --> C
-```
-
-Key functions in `sketch.ino`:
-
-| Function | Responsibility |
-| --- | --- |
-| `setup()` | Initialize Serial, RouterBridge, I²C, LCD, INA219, Modulino and servos; calibrate IMU |
-| `calibrateIMU()` | Average stationary accelerometer X/Y readings to establish offsets |
-| `updatePosition()` | Integrate offset-corrected acceleration into approximate X/Y velocity and position |
-| `isStable()` / `waitForStability()` | Wait until acceleration readings are sufficiently stable and confirm a safety delay |
-| `readPanel()` / `readLight()` | Sample electrical readings and analog light level |
-| `Scan()` | Fill the 7×5 measurement maps and identify maximum-power pan/tilt |
-| `savePreviousMap()` / `printDiffMap()` | Compare power against the previous full scan |
-| `recordMapPoint()` / `printMapCSV()` | Retain and print a bounded history of scan locations and best orientations |
-| `showScanResultLCD()` | Show the most recent scan result on the 16×2 display |
-| `sendPositionAndPower()` | Build JSON and call `Bridge.notify("solar_data", json)` |
-
-### Timing
-
-The sketch settles servos for **350 ms per command** and averages both light and electrical samples at every one of the **35** orientations. The pan servo is additionally moved once per pan row. Consequently, a complete scan typically takes **tens of seconds**, plus stability checks and serial output. The web UI's one-second refresh rate does **not** imply one new scan per second.
-
-The program sends one Bridge message **after** the entire scan, not one message per angle.
-
-## Arduino → Python message format
-
-`sendPositionAndPower()` serializes:
+Packet shape:
 
 ```json
 {
   "x": 1.25,
   "y": -0.40,
   "power": [
-    [2, 4, 6, 8, 10],
-    [3, 5, 7, 9, 11],
-    [4, 6, 8, 10, 12],
-    [5, 7, 9, 11, 13],
-    [6, 8, 10, 12, 14],
-    [7, 9, 11, 13, 15],
-    [8, 10, 12, 14, 16]
+    [2,4,6,8,10],
+    [3,5,7,9,11],
+    [4,6,8,10,12],
+    [5,7,9,11,13],
+    [6,8,10,12,14],
+    [7,9,11,13,15],
+    [8,10,12,14,16]
   ]
 }
 ```
 
-The actual sketch formats X/Y to **three decimal places** and each power value to **one decimal place**. This example shows the shape and units, not a real sensor recording.
+- `x`/`y`: floating-point relative cart-position estimates, formatted to **three decimal places**.
+- `power`: 7 rows × 5 columns of power in **milliwatts**, formatted to **one decimal place**.
+- The callback name is exactly `solar_data`. The Python side registers `Bridge.provide("solar_data", collector.receive)`.
+- Python computes an average of the **35** powers for the map's route-color and Current Power card, and stores both the scan's mean and its individual maximum in SQLite.
 
-The notification call is:
+The outgoing packet has **no timestamp, run ID, start GPS, or heading**. The Python backend supplies a receive timestamp and assigns a run ID. The starting GPS location is added through the dashboard.
 
-```cpp
-Bridge.notify("solar_data", json);
-```
+## On-device display and diagnostic data
 
-The matching Python receiver is registered in `python/app.py` under `"solar_data"`, and `python/collector.py` reads `data["power"]`. Python validates the 7×5 array, computes its **mean** power and exposes the result at `GET /api/solar`.
+- **LCD row 1:** latest estimated `X` and `Y` values, with 2 decimal places.
+- **LCD row 2:** `Pmax:` and the *best angle's individual power*, in mW.
+- **Serial:** scan-by-scan pan/tilt, analog light, V/I/P, complete light and power tables, changes from the previous scan, best orientation and a CSV-like route summary.
+- **`mapPoints[MAX_POINTS]`:** at most **50** firmware-side summary points for the Serial report. This limit is **not** the SQLite storage limit; the sketch continues to send its complete matrix even after the firmware summary array becomes full.
 
-### Peak power vs. mean power
+## Running and troubleshooting
 
-- **MCU:** keeps `maxPower` (best individual orientation) to select servo angles and show `Pmax` on the LCD.
-- **Python:** averages **all 35** values to compute each trajectory-point `power_mw`.
-- **Web dashboard:** colors the route by that **average** and displays the latest full matrix.
+1. Position the cart stably and connect all sensors, servos and the LCD.
+2. Open the Arduino UNO Q project in **Arduino App Lab** and compile the sketch with `sketch.yaml` dependencies.
+3. Start the Python app on the same UNO Q so the Bridge callback is ready.
+4. Watch Serial for initialization (`BRIDGE OK`, `WIRE OK`, `INA219 OK`, `Movement OK`) and scan completion (`JSON inviato`).
+5. On the dashboard, confirm the live run receives the expected 35-cell matrix. Stop/move/stop the cart to add another point.
 
-Thus the LCD maximum and web trajectory power are different statistics by design.
+**Compilation errors about `ModulinoHubPort::select()`, `clear()`, `Modulino` or `__increaseI2CPriority()`:** these are **linker-level Modulino symbols**, not JavaScript or database issues. Ensure the matching Arduino_Modulino implementation source is included by your installed App Lab/Zephyr library build; try clearing the App Lab build cache and checking the installed library version. Avoid papering over the linker problem by changing unrelated solar dashboard files.
 
-## How to run a measurement session
+**No sensor data:** check INA219 I²C address (`0x40`), that the Modulino starts, Servo power/ground, Serial logs and whether a complete sweep finishes and `Bridge.notify()` executes. Check the Python backend for invalid 7×5 matrix logging.
 
-1. Connect the hardware and ensure the INA219 is found on I²C address `0x40`.
-2. Open the project in **Arduino App Lab** and build/upload the sketch for the UNO Q using the libraries/profile in `sketch.yaml`.
-3. Start the companion Python App Lab application (`python/main.py`); verify the `solar_data` Bridge receiver is registered.
-4. Open the Serial Monitor at **9,600 baud**. The sketch prints initialization status and IMU calibration results.
-5. Keep the cart **stationary during calibration**.
-6. Leave it stationary for the stability check and complete 35-point servo scan. Observe electrical readings and the reported optimal angle.
-7. Wait for `JSON inviato:` in Serial and for the Python collector to print `X=..., Y=..., P=... mW`.
-8. Move the cart, stop at a new location, then allow another scan to build the route.
+**Scans repeat/no new point:** after a scan, the MCU waits until it detects movement; stable readings alone do not trigger another sweep until that state changes.
 
-The firmware waits for movement after every scan before beginning the next one.
+## Important engineering limitations
 
-## Engineering limitations and notes
+- **IMU position is an estimate, not GPS:** raw acceleration integration accumulates drift and depends on orientation and gravity. There is no wheel odometry, absolute heading or GPS receiver in the current transmitted payload.
+- **Database run changes do not reset the firmware's X/Y:** clicking **New run** in the dashboard or restarting Python does not automatically reset `posX` and `posY` on the still-running MCU. A run-specific coordinate reset needs additional firmware/protocol support or backend re-basing.
+- **A0 light sensing differs from panel power:** the light map is a raw analog signal; the quantitative power shown on the dashboard comes from INA219 voltage × current measurements, not irradiance calibration.
+- **Power draw and geometry need calibration:** readings depend on the PV panel, electrical load, temperature and actual physical positioning. The dashboard's centered angle labels are not independent angle-sensor measurements.
+- **Firmware-local buffers are bounded:** `MAX_POINTS = 50` affects the Arduino's Serial map report, not the number of scans SQLite can retain.
 
-- **IMU dead reckoning drifts.** `updatePosition()` integrates acceleration over elapsed time but does not compensate for orientation/tilt and accumulated sensor bias. X/Y are local estimates, not GPS coordinates, and their axes are not guaranteed east/north.
-- **Scan-time integration gap.** Long servo scans interrupt calls to `updatePosition()`; the first subsequent time interval may be large. This can introduce position error if the acceleration estimate is nonzero.
-- **Stability is based on acceleration differences.** The cart may be judged stable if acceleration is constant, even when physical motion is not zero. This is a prototype heuristic, not a motion-tracking guarantee.
-- **Serial map history is limited to 50 points** (`MAX_POINTS = 50`); Python keeps a separate in-memory history of up to 1,500 points.
-- **Negative measured power is possible** for certain current directions; `maxPower` starts at zero, so if every reading is negative the default best angles (90°, 90°) remain selected.
-- **Servo safety:** check mechanical clearances, stops, and power-supply current capacity before scanning the full configured angle range.
-- **Calibration and load matter:** INA219 reports electrical measurements at its connection point; ensure the wiring and test load match the quantity you intend to characterize.
-
-## Related documentation
-
-- [Project overview](../README.md)
-- [Python data processing and WebUI API](../python/README.md)
+See [project overview](../README.md), [Python/SQLite backend](../python/readme.md), and [dashboard](../assets/readme.md).
